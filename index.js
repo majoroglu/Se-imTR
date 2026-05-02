@@ -49,3 +49,6 @@ client.on("guildMemberUpdate", async (oldM, newM) => {
 });
 
 client.login(TOKEN);
+
+const http = require('http');
+http.createServer((req, res) => res.end('Bot Aktif')).listen(process.env.PORT || 10000);
