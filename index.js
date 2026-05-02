@@ -1,13 +1,11 @@
 const { Client, GatewayIntentBits, AuditLogEvent, Partials } = require('discord.js');
 const http = require('http');
 
-// --- RENDER'I KANDIRAN KISIM ---
-// Render 'Port' beklediği için ona ufak bir server açıyoruz
+// Render'ı kandırmak ve botun 7/24 açık kalmasını sağlamak için tek sunucu:
 http.createServer((req, res) => {
-  res.write("Bot 7/24 Aktif!");
-  res.end();
-}).listen(10000); // Render genelde 10000 portunu sever
-// ------------------------------
+  res.writeHead(200, {'Content-Type': 'text/plain'});
+  res.end('Bot 7/24 Aktif!');
+}).listen(process.env.PORT || 10000);
 
 const client = new Client({
   intents: [
@@ -18,9 +16,7 @@ const client = new Client({
   partials: [Partials.GuildMember, Partials.User]
 });
 
-const TOKEN = "YENI_TOKENINI_YAZ"; 
 const LOG_CHANNEL_ID = "1499712129551433848";
-
 const WHITELIST_ROLES = ["1376625962027843695", "1376625962027843696", "1376625962027843697", "1376625962027843698"];
 
 client.on("ready", async () => {
@@ -48,10 +44,5 @@ client.on("guildMemberUpdate", async (oldM, newM) => {
   } catch (e) { console.log(e.message); }
 });
 
+// Botu başlat
 client.login(process.env.TOKEN);
-
-const http = require('http');
-http.createServer((req, res) => {
-    res.writeHead(200, {'Content-Type': 'text/plain'});
-    res.end('Bot Aktif');
-}).listen(process.env.PORT || 10000);
