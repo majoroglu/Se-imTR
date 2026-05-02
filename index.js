@@ -48,8 +48,6 @@ client.on("guildMemberUpdate", async (oldM, newM) => {
   } catch (e) { console.log(e.message); }
 });
 
-client.login(TOKEN);
-
 client.login(process.env.TOKEN);
 
 const http = require('http');
