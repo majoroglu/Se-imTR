@@ -50,5 +50,10 @@ client.on("guildMemberUpdate", async (oldM, newM) => {
 
 client.login(TOKEN);
 
+client.login(process.env.TOKEN);
+
 const http = require('http');
-http.createServer((req, res) => res.end('Bot Aktif')).listen(process.env.PORT || 10000);
+http.createServer((req, res) => {
+    res.writeHead(200, {'Content-Type': 'text/plain'});
+    res.end('Bot Aktif');
+}).listen(process.env.PORT || 10000);
