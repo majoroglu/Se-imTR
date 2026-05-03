@@ -244,14 +244,35 @@ function createBot() {
       const targetId = entry.targetId ? String(entry.targetId) : null;
       if (!targetId) return;
 
-      const addedIds = roleIdsFromAuditChanges(entry.changes, '$add').filter((id) =>
-        WHITELIST_ROLES.has(id)
-      );
-      const removedIds = roleIdsFromAuditChanges(entry.changes, '$remove').filter((id) =>
-        WHITELIST_ROLES.has(id)
-      );
+      const rawAdd = roleIdsFromAuditChanges(entry.changes, '$add');
+      const rawRemove = roleIdsFromAuditChanges(entry.changes, '$remove');
 
-      if (addedIds.length === 0 && removedIds.length === 0) return;
+      if (process.env.DEBUG_AUDIT === '1') {
+        log('[audit-debug] MemberRoleUpdate', guild.name, 'hedef', targetId, '+', rawAdd, '-', rawRemove);
+      }
+
+      const addedIds = rawAdd.filter((id) => WHITELIST_ROLES.has(id));
+      const removedIds = rawRemove.filter((id) => WHITELIST_ROLES.has(id));
+
+      if (addedIds.length === 0 && removedIds.length === 0) {
+        if (process.env.DEBUG_AUDIT === '1' && (rawAdd.length > 0 || rawRemove.length > 0)) {
+          log(
+            '[audit-debug] whitelist eşleşmedi; LOG_CHANNEL’a yazılmadı. İstenen rol ID’leri kodda WHITELIST_ROLES ile aynı mı kontrol et.'
+          );
+        }
+        return;
+      }
+
+      log(
+        '[discord] rol log gönderiliyor',
+        guild.name,
+        'üye',
+        targetId,
+        'verilen',
+        addedIds,
+        'alınan',
+        removedIds
+      );
 
       const logChan = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
       if (!logChan || !logChan.isTextBased()) {
