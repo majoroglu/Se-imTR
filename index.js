@@ -53,6 +53,76 @@ function readDiscordToken() {
   return t;
 }
 
+function auditChangeHasRole(changes, key, roleId) {
+  const ch = changes.find((c) => c.key === key);
+  const arr = ch?.new;
+  if (!Array.isArray(arr)) return false;
+  const rid = String(roleId);
+  return arr.some((item) => item && String(item.id) === rid);
+}
+
+function pickMemberRoleAuditEntry(logs, memberUserId, addedRoleIds, removedRoleIds) {
+  const now = Date.now();
+  const maxAge = 12_000;
+  const added = [...addedRoleIds];
+  const removed = [...removedRoleIds];
+  const list = [...logs.entries.values()];
+
+  for (const entry of list) {
+    if (entry.targetId !== memberUserId) continue;
+    if (now - entry.createdTimestamp > maxAge) continue;
+    let match = false;
+    for (const id of added) {
+      if (auditChangeHasRole(entry.changes, '$add', id)) match = true;
+    }
+    for (const id of removed) {
+      if (auditChangeHasRole(entry.changes, '$remove', id)) match = true;
+    }
+    if (match) return entry;
+  }
+
+  for (const entry of list) {
+    if (entry.targetId !== memberUserId) continue;
+    if (now - entry.createdTimestamp > maxAge) continue;
+    return entry;
+  }
+
+  return null;
+}
+
+async function formatAuditActor(entry, client) {
+  if (!entry?.executorId) {
+    return '**İşlemi yapan (audit):** Bilinmiyor';
+  }
+
+  let ex = entry.executor;
+  if (!ex?.tag) {
+    try {
+      ex = await client.users.fetch(entry.executorId);
+    } catch {
+      ex = null;
+    }
+  }
+
+  const mention = `<@${entry.executorId}>`;
+  const tag = ex?.tag ?? entry.executorId;
+  const lines = [`**İşlemi yapan (audit):** ${mention} · \`${tag}\``];
+
+  if (entry.reason?.trim()) {
+    lines.push(`**Audit sebep:** ${entry.reason.trim()}`);
+  }
+  if (entry.extra?.integrationType) {
+    lines.push(`**Kaynak:** \`${entry.extra.integrationType}\``);
+  }
+  if (ex?.bot) {
+    lines.push(
+      '*Not: İşlemi API üzerinden bu bot yaptı. Komutu veren moderatörü Discord çoğu zaman burada göstermez; Marpel Pro / benzeri botlar bazen yukarıdaki **Audit sebep** satırına moderatörü yazar—bot ayarına bağlı.*'
+    );
+  }
+
+  return lines.join('\n');
+}
+
 const LANDING_HTML = `<!DOCTYPE html>
 <html lang="tr">
 <head>
@@ -179,24 +249,21 @@ function createBot() {
       }
 
       const logs = await newM.guild
-        .fetchAuditLogs({ limit: 1, type: AuditLogEvent.MemberRoleUpdate })
+        .fetchAuditLogs({ limit: 20, type: AuditLogEvent.MemberRoleUpdate })
         .catch(() => null);
-      const entry = logs?.entries?.first?.() ?? null;
-      const exec =
-        entry &&
-        entry.targetId === newM.id &&
-        entry.executor
-          ? entry.executor.tag
-          : 'Bilinmiyor';
+      const entry = logs
+        ? pickMemberRoleAuditEntry(logs, newM.id, added.keys(), removed.keys())
+        : null;
+      const whoBlock = await formatAuditActor(entry, newM.client);
 
       for (const r of added.values()) {
         await logChan.send(
-          `➕ **${r.name}** verildi -> \`${newM.user.tag}\` | Yapan: \`${exec}\``
+          `➕ **${r.name}** verildi → Üye: <@${newM.id}> (\`${newM.user.tag}\`)\n${whoBlock}`
         );
       }
       for (const r of removed.values()) {
         await logChan.send(
-          `➖ **${r.name}** alındı -> \`${newM.user.tag}\` | Yapan: \`${exec}\``
+          `➖ **${r.name}** alındı → Üye: <@${newM.id}> (\`${newM.user.tag}\`)\n${whoBlock}`
         );
       }
     } catch (err) {
