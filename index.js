@@ -1,7 +1,11 @@
 'use strict';
 
 const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '.env') });
+try {
+  require('dotenv').config({ path: path.join(__dirname, '.env') });
+} catch (e) {
+  if (e.code !== 'MODULE_NOT_FOUND') throw e;
+}
 
 const http = require('http');
 const {
