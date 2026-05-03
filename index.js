@@ -30,6 +30,9 @@ const WHITELIST_ROLES = new Set(
   ].map(String)
 );
 
+/** Aynı audit satırı gateway + fetch ile iki kez işlenmesin */
+const seenAuditLogIds = new Map();
+
 /* -------------------------------------------------------------------------- */
 /*  Yardımcılar                                                                */
 /* -------------------------------------------------------------------------- */
@@ -66,6 +69,32 @@ function roleIdsFromAuditChanges(changes, key) {
   return ch.new
     .map((x) => (x != null && x.id != null ? String(x.id) : null))
     .filter(Boolean);
+}
+
+function isDuplicateAuditDelivery(id) {
+  if (id == null || id === '') return false;
+  const s = String(id);
+  const now = Date.now();
+  for (const [k, t] of seenAuditLogIds) {
+    if (now - t > 120_000) seenAuditLogIds.delete(k);
+  }
+  if (seenAuditLogIds.has(s)) return true;
+  seenAuditLogIds.set(s, now);
+  return false;
+}
+
+function pickLatestAuditForUser(logs, userId, maxAgeMs) {
+  const uid = String(userId);
+  const now = Date.now();
+  const list = [...logs.entries.values()]
+    .filter(
+      (e) =>
+        e.targetId != null &&
+        String(e.targetId) === uid &&
+        now - e.createdTimestamp <= maxAgeMs
+    )
+    .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+  return list[0] ?? null;
 }
 
 function safeAuditReason(reason) {
@@ -122,6 +151,78 @@ async function formatAuditActor(entry, client) {
     return lines.join('\n');
   } catch (e) {
     return `**İşlemi yapan (audit):** (ayrıştırma hatası: ${e.message})`;
+  }
+}
+
+async function deliverWhitelistRoleLogFromAudit(entry, guild, client) {
+  if (entry.action !== AuditLogEvent.MemberRoleUpdate) return;
+
+  const targetId = entry.targetId ? String(entry.targetId) : null;
+  if (!targetId) return;
+
+  const rawAdd = roleIdsFromAuditChanges(entry.changes, '$add');
+  const rawRemove = roleIdsFromAuditChanges(entry.changes, '$remove');
+
+  if (process.env.DEBUG_AUDIT === '1') {
+    log('[audit-debug] MemberRoleUpdate', guild.name, 'hedef', targetId, '+', rawAdd, '-', rawRemove);
+  }
+
+  const addedIds = rawAdd.filter((id) => WHITELIST_ROLES.has(id));
+  const removedIds = rawRemove.filter((id) => WHITELIST_ROLES.has(id));
+
+  if (addedIds.length === 0 && removedIds.length === 0) {
+    if (process.env.DEBUG_AUDIT === '1' && (rawAdd.length > 0 || rawRemove.length > 0)) {
+      log(
+        '[audit-debug] whitelist eşleşmedi. Kod içi WHITELIST_ROLES ile sunucudaki rol ID’leri aynı olmalı.'
+      );
+    }
+    return;
+  }
+
+  const logChan = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
+  if (!logChan || !logChan.isTextBased()) {
+    logErr('[discord] log kanalı yok veya metin kanalı değil:', LOG_CHANNEL_ID);
+    return;
+  }
+
+  if (isDuplicateAuditDelivery(entry.id)) return;
+
+  log(
+    '[discord] rol log gönderiliyor',
+    guild.name,
+    'üye',
+    targetId,
+    'verilen',
+    addedIds,
+    'alınan',
+    removedIds
+  );
+
+  const member = await guild.members.fetch(targetId).catch(() => null);
+  const whoLabel = member
+    ? safeTick(member.user.tag ?? member.user.username ?? targetId)
+    : safeTick(targetId);
+
+  let whoBlock = '**İşlemi yapan (audit):** Bilinmiyor';
+  try {
+    whoBlock = await formatAuditActor(entry, client);
+  } catch (e) {
+    logErr('[discord] formatAuditActor:', e?.message || e);
+  }
+
+  for (const rid of addedIds) {
+    const role = guild.roles.cache.get(rid);
+    const name = role?.name ?? rid;
+    await logChan.send(
+      `➕ **${safeTick(name)}** verildi → Üye: <@${targetId}> (\`${whoLabel}\`) · **ID:** \`${targetId}\`\n${whoBlock}`
+    );
+  }
+  for (const rid of removedIds) {
+    const role = guild.roles.cache.get(rid);
+    const name = role?.name ?? rid;
+    await logChan.send(
+      `➖ **${safeTick(name)}** alındı → Üye: <@${targetId}> (\`${whoLabel}\`) · **ID:** \`${targetId}\`\n${whoBlock}`
+    );
   }
 }
 
@@ -233,81 +334,38 @@ function createBot() {
     logErr('[discord] client error:', err?.message || err);
   });
 
-  /**
-   * Rol logları buradan: guildMemberUpdate önbellek yüzünden sık boş kalıyordu.
-   * GUILD_AUDIT_LOG_ENTRY_CREATE + GuildModeration intent gerekir (Portal’da açık olsun).
-   */
   client.on(Events.GuildAuditLogEntryCreate, async (entry, guild) => {
     try {
-      if (entry.action !== AuditLogEvent.MemberRoleUpdate) return;
+      await deliverWhitelistRoleLogFromAudit(entry, guild, client);
+    } catch (err) {
+      logErr('[discord] GuildAuditLogEntryCreate:', err?.message || err);
+      if (err?.stack) logErr(err.stack);
+    }
+  });
 
-      const targetId = entry.targetId ? String(entry.targetId) : null;
-      if (!targetId) return;
-
-      const rawAdd = roleIdsFromAuditChanges(entry.changes, '$add');
-      const rawRemove = roleIdsFromAuditChanges(entry.changes, '$remove');
-
-      if (process.env.DEBUG_AUDIT === '1') {
-        log('[audit-debug] MemberRoleUpdate', guild.name, 'hedef', targetId, '+', rawAdd, '-', rawRemove);
-      }
-
-      const addedIds = rawAdd.filter((id) => WHITELIST_ROLES.has(id));
-      const removedIds = rawRemove.filter((id) => WHITELIST_ROLES.has(id));
-
-      if (addedIds.length === 0 && removedIds.length === 0) {
-        if (process.env.DEBUG_AUDIT === '1' && (rawAdd.length > 0 || rawRemove.length > 0)) {
-          log(
-            '[audit-debug] whitelist eşleşmedi; LOG_CHANNEL’a yazılmadı. İstenen rol ID’leri kodda WHITELIST_ROLES ile aynı mı kontrol et.'
-          );
+  /**
+   * Yedek: Gateway audit bazen gelmez (uyku, bağlantı). Üye güncellenince audit’i REST’ten çek.
+   */
+  client.on('guildMemberUpdate', async (_oldM, newM) => {
+    try {
+      await new Promise((r) => setTimeout(r, 1200));
+      const logs = await newM.guild
+        .fetchAuditLogs({ limit: 15, type: AuditLogEvent.MemberRoleUpdate })
+        .catch(() => null);
+      if (!logs) return;
+      const entry = pickLatestAuditForUser(logs, newM.id, 30_000);
+      if (!entry) {
+        if (process.env.DEBUG_AUDIT === '1') {
+          log('[audit-debug] guildMemberUpdate: son 30s içinde audit yok', newM.guild.name, newM.id);
         }
         return;
       }
-
-      log(
-        '[discord] rol log gönderiliyor',
-        guild.name,
-        'üye',
-        targetId,
-        'verilen',
-        addedIds,
-        'alınan',
-        removedIds
-      );
-
-      const logChan = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
-      if (!logChan || !logChan.isTextBased()) {
-        logErr('[discord] log kanalı yok veya metin kanalı değil:', LOG_CHANNEL_ID);
-        return;
+      if (process.env.DEBUG_AUDIT === '1') {
+        log('[audit-debug] guildMemberUpdate → audit fetch', entry.id, newM.id);
       }
-
-      const member = await guild.members.fetch(targetId).catch(() => null);
-      const whoLabel = member
-        ? safeTick(member.user.tag ?? member.user.username ?? targetId)
-        : safeTick(targetId);
-
-      let whoBlock = '**İşlemi yapan (audit):** Bilinmiyor';
-      try {
-        whoBlock = await formatAuditActor(entry, client);
-      } catch (e) {
-        logErr('[discord] formatAuditActor:', e?.message || e);
-      }
-
-      for (const rid of addedIds) {
-        const role = guild.roles.cache.get(rid);
-        const name = role?.name ?? rid;
-        await logChan.send(
-          `➕ **${safeTick(name)}** verildi → Üye: <@${targetId}> (\`${whoLabel}\`) · **ID:** \`${targetId}\`\n${whoBlock}`
-        );
-      }
-      for (const rid of removedIds) {
-        const role = guild.roles.cache.get(rid);
-        const name = role?.name ?? rid;
-        await logChan.send(
-          `➖ **${safeTick(name)}** alındı → Üye: <@${targetId}> (\`${whoLabel}\`) · **ID:** \`${targetId}\`\n${whoBlock}`
-        );
-      }
+      await deliverWhitelistRoleLogFromAudit(entry, newM.guild, client);
     } catch (err) {
-      logErr('[discord] GuildAuditLogEntryCreate:', err?.message || err);
+      logErr('[discord] guildMemberUpdate yedek:', err?.message || err);
       if (err?.stack) logErr(err.stack);
     }
   });
