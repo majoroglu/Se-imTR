@@ -134,10 +134,14 @@ app.get('/', (req, res) => {
   res.type('html').send(LANDING_HTML);
 });
 
-// Render'da portu dinliyoruz
-const port = process.env.PORT || 10000;
-app.listen(port, () => {
-  console.log(`HTTP Server aktif! Port: ${port}`);
+// Render / PaaS: dışarıdan erişim için 0.0.0.0 şart (sadece localhost dinlemek deploy'u düşürür)
+const port = Number(process.env.PORT) || 10000;
+const server = app.listen(port, '0.0.0.0', () => {
+  console.log(`HTTP Server aktif! http://0.0.0.0:${port}`);
+});
+server.on('error', (err) => {
+  console.error('HTTP sunucu hatası:', err);
+  process.exit(1);
 });
 
 // Discord.js bot ayarları
