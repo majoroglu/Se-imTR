@@ -106,7 +106,9 @@ async function formatAuditActor(entry, client) {
 
   const mention = `<@${entry.executorId}>`;
   const tag = ex?.tag ?? entry.executorId;
-  const lines = [`**İşlemi yapan (audit):** ${mention} · \`${tag}\``];
+  const lines = [
+    `**İşlemi yapan (audit):** ${mention} · \`${tag}\` · **ID:** \`${entry.executorId}\``
+  ];
 
   if (entry.reason?.trim()) {
     lines.push(`**Audit sebep:** ${entry.reason.trim()}`);
@@ -258,12 +260,12 @@ function createBot() {
 
       for (const r of added.values()) {
         await logChan.send(
-          `➕ **${r.name}** verildi → Üye: <@${newM.id}> (\`${newM.user.tag}\`)\n${whoBlock}`
+          `➕ **${r.name}** verildi → Üye: <@${newM.id}> (\`${newM.user.tag}\`) · **ID:** \`${newM.id}\`\n${whoBlock}`
         );
       }
       for (const r of removed.values()) {
         await logChan.send(
-          `➖ **${r.name}** alındı → Üye: <@${newM.id}> (\`${newM.user.tag}\`)\n${whoBlock}`
+          `➖ **${r.name}** alındı → Üye: <@${newM.id}> (\`${newM.user.tag}\`) · **ID:** \`${newM.id}\`\n${whoBlock}`
         );
       }
     } catch (err) {
