@@ -21,12 +21,14 @@ const {
 /* -------------------------------------------------------------------------- */
 
 const LOG_CHANNEL_ID = '1499712129551433848';
-const WHITELIST_ROLES = new Set([
-  '1376625962027843695',
-  '1376625962027843696',
-  '1376625962027843697',
-  '1376625962027843698'
-]);
+const WHITELIST_ROLES = new Set(
+  [
+    '1376625962027843695',
+    '1376625962027843696',
+    '1376625962027843697',
+    '1376625962027843698'
+  ].map(String)
+);
 
 /* -------------------------------------------------------------------------- */
 /*  Yardımcılar                                                                */
@@ -57,63 +59,13 @@ function readDiscordToken() {
   return t;
 }
 
-function auditChangeHasRole(changes, key, roleId) {
+/** Audit kaydındaki $add / $remove rol id listesi (gateway + REST aynı yapı) */
+function roleIdsFromAuditChanges(changes, key) {
   const ch = (changes || []).find((c) => c.key === key);
-  const arr = ch?.new;
-  if (!Array.isArray(arr)) return false;
-  const rid = String(roleId);
-  return arr.some((item) => item && String(item.id) === rid);
-}
-
-/** Bazı kayıtlarda rol $add dışında dizilerde gelebilir */
-function auditChangesMentionRole(changes, roleId) {
-  const rid = String(roleId);
-  for (const c of changes || []) {
-    for (const key of ['new', 'old']) {
-      const v = c[key];
-      if (!Array.isArray(v)) continue;
-      if (v.some((item) => item && String(item.id) === rid)) return true;
-    }
-  }
-  return false;
-}
-
-function pickMemberRoleAuditEntry(logs, memberUserId, addedRoleIds, removedRoleIds) {
-  const uid = String(memberUserId);
-  const now = Date.now();
-  const maxAge = 30_000;
-  const added = [...addedRoleIds];
-  const removed = [...removedRoleIds];
-
-  const forUser = [...logs.entries.values()]
-    .filter((e) => e.targetId != null && String(e.targetId) === uid)
-    .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
-
-  if (forUser.length === 0) return null;
-
-  const pool = forUser.filter((e) => now - e.createdTimestamp <= maxAge);
-  const searchIn = pool.length > 0 ? pool : forUser;
-
-  for (const entry of searchIn) {
-    for (const id of added) {
-      if (
-        auditChangeHasRole(entry.changes, '$add', id) ||
-        auditChangesMentionRole(entry.changes, id)
-      ) {
-        return entry;
-      }
-    }
-    for (const id of removed) {
-      if (
-        auditChangeHasRole(entry.changes, '$remove', id) ||
-        auditChangesMentionRole(entry.changes, id)
-      ) {
-        return entry;
-      }
-    }
-  }
-
-  return searchIn[0];
+  if (!ch?.new || !Array.isArray(ch.new)) return [];
+  return ch.new
+    .map((x) => (x != null && x.id != null ? String(x.id) : null))
+    .filter(Boolean);
 }
 
 function safeAuditReason(reason) {
@@ -281,16 +233,25 @@ function createBot() {
     logErr('[discord] client error:', err?.message || err);
   });
 
-  client.on('guildMemberUpdate', async (oldM, newM) => {
+  /**
+   * Rol logları buradan: guildMemberUpdate önbellek yüzünden sık boş kalıyordu.
+   * GUILD_AUDIT_LOG_ENTRY_CREATE + GuildModeration intent gerekir (Portal’da açık olsun).
+   */
+  client.on(Events.GuildAuditLogEntryCreate, async (entry, guild) => {
     try {
-      const added = newM.roles.cache.filter(
-        (r) => !oldM.roles.cache.has(r.id) && WHITELIST_ROLES.has(r.id)
+      if (entry.action !== AuditLogEvent.MemberRoleUpdate) return;
+
+      const targetId = entry.targetId ? String(entry.targetId) : null;
+      if (!targetId) return;
+
+      const addedIds = roleIdsFromAuditChanges(entry.changes, '$add').filter((id) =>
+        WHITELIST_ROLES.has(id)
       );
-      const removed = oldM.roles.cache.filter(
-        (r) => !newM.roles.cache.has(r.id) && WHITELIST_ROLES.has(r.id)
+      const removedIds = roleIdsFromAuditChanges(entry.changes, '$remove').filter((id) =>
+        WHITELIST_ROLES.has(id)
       );
 
-      if (added.size === 0 && removed.size === 0) return;
+      if (addedIds.length === 0 && removedIds.length === 0) return;
 
       const logChan = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
       if (!logChan || !logChan.isTextBased()) {
@@ -298,33 +259,34 @@ function createBot() {
         return;
       }
 
-      const logs = await newM.guild
-        .fetchAuditLogs({ limit: 20, type: AuditLogEvent.MemberRoleUpdate })
-        .catch(() => null);
-      const entry = logs
-        ? pickMemberRoleAuditEntry(logs, newM.id, added.keys(), removed.keys())
-        : null;
+      const member = await guild.members.fetch(targetId).catch(() => null);
+      const whoLabel = member
+        ? safeTick(member.user.tag ?? member.user.username ?? targetId)
+        : safeTick(targetId);
+
       let whoBlock = '**İşlemi yapan (audit):** Bilinmiyor';
       try {
-        whoBlock = await formatAuditActor(entry, newM.client);
+        whoBlock = await formatAuditActor(entry, client);
       } catch (e) {
         logErr('[discord] formatAuditActor:', e?.message || e);
       }
 
-      const whoLabel = safeTick(newM.user.tag ?? newM.user.username ?? newM.id);
-
-      for (const r of added.values()) {
+      for (const rid of addedIds) {
+        const role = guild.roles.cache.get(rid);
+        const name = role?.name ?? rid;
         await logChan.send(
-          `➕ **${safeTick(r.name)}** verildi → Üye: <@${newM.id}> (\`${whoLabel}\`) · **ID:** \`${newM.id}\`\n${whoBlock}`
+          `➕ **${safeTick(name)}** verildi → Üye: <@${targetId}> (\`${whoLabel}\`) · **ID:** \`${targetId}\`\n${whoBlock}`
         );
       }
-      for (const r of removed.values()) {
+      for (const rid of removedIds) {
+        const role = guild.roles.cache.get(rid);
+        const name = role?.name ?? rid;
         await logChan.send(
-          `➖ **${safeTick(r.name)}** alındı → Üye: <@${newM.id}> (\`${whoLabel}\`) · **ID:** \`${newM.id}\`\n${whoBlock}`
+          `➖ **${safeTick(name)}** alındı → Üye: <@${targetId}> (\`${whoLabel}\`) · **ID:** \`${targetId}\`\n${whoBlock}`
         );
       }
     } catch (err) {
-      logErr('[discord] guildMemberUpdate:', err?.message || err);
+      logErr('[discord] GuildAuditLogEntryCreate:', err?.message || err);
       if (err?.stack) logErr(err.stack);
     }
   });
