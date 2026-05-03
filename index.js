@@ -1,5 +1,8 @@
 'use strict';
 
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+
 const http = require('http');
 const {
   Client,
@@ -146,8 +149,16 @@ function createBot() {
     partials: [Partials.GuildMember, Partials.User]
   });
 
-  client.once(Events.ClientReady, (c) => {
+  const onReady = (c) => {
     log('[discord] hazır:', c.user.tag, `(${c.guilds.cache.size} sunucu)`);
+  };
+  client.once(Events.ClientReady, onReady);
+
+  client.on('shardError', (err, id) => {
+    logErr('[discord] shardError', id, err?.message || err);
+  });
+  client.on('error', (err) => {
+    logErr('[discord] client error:', err?.message || err);
   });
 
   client.on('guildMemberUpdate', async (oldM, newM) => {
@@ -209,26 +220,43 @@ process.on('uncaughtException', (err) => {
 });
 
 async function main() {
-  log('[boot] başlıyor', `node ${process.version}`);
+  log('[boot] başlıyor', `node ${process.version}`, `cwd=${process.cwd()}`, `dir=${__dirname}`);
 
   await startHttp();
 
   const token = readDiscordToken();
   if (!token) {
     logErr(
-      '[boot] Discord token yok. Render → Environment: TOKEN, DISCORD_TOKEN veya BOT_TOKEN'
+      '[boot] TOKEN boş. Yerel: index.js ile aynı klasörde .env içinde TOKEN=... | Render: Environment\'da TOKEN ekle, sonra redeploy.'
     );
     return;
   }
 
-  log('[boot] token okundu, Discord girişi…');
+  if (token.length < 50 || token.length > 90) {
+    logErr(
+      '[boot] TOKEN uzunluğu şüpheli (' +
+        token.length +
+        '). Bot token mi yapıştırdın? (Client Secret değil.)'
+    );
+  }
+
+  log('[boot] TOKEN var, uzunluk:', token.length, '→ Discord login…');
   const client = createBot();
 
   try {
     await client.login(token);
+    log('[boot] login() promise tamam; gateway bağlantısı için [discord] hazır satırını bekle.');
   } catch (e) {
-    logErr('[boot] login başarısız:', e?.message || e);
-    logErr('[boot] Portal: token sıfırlanmadı mı? Intent: Server Members açık mı?');
+    const code = e?.code;
+    logErr('[boot] login başarısız:', e?.message || e, code != null ? `code=${code}` : '');
+    if (String(e?.message).includes('intent') || code === 'DisallowedIntents') {
+      logErr(
+        '[boot] Developer Portal → Bot → Privileged Gateway Intents: SERVER MEMBERS INTENT aç.'
+      );
+    }
+    if (String(e?.message).toLowerCase().includes('invalid') || code === 'TokenInvalid') {
+      logErr('[boot] Token geçersiz / sıfırlanmış. Yeni token al, Render .env ile aynı değeri kullan.');
+    }
   }
 }
 
