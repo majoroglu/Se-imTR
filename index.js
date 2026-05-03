@@ -54,75 +54,119 @@ function readDiscordToken() {
 }
 
 function auditChangeHasRole(changes, key, roleId) {
-  const ch = changes.find((c) => c.key === key);
+  const ch = (changes || []).find((c) => c.key === key);
   const arr = ch?.new;
   if (!Array.isArray(arr)) return false;
   const rid = String(roleId);
   return arr.some((item) => item && String(item.id) === rid);
 }
 
+/** Bazı kayıtlarda rol $add dışında dizilerde gelebilir */
+function auditChangesMentionRole(changes, roleId) {
+  const rid = String(roleId);
+  for (const c of changes || []) {
+    for (const key of ['new', 'old']) {
+      const v = c[key];
+      if (!Array.isArray(v)) continue;
+      if (v.some((item) => item && String(item.id) === rid)) return true;
+    }
+  }
+  return false;
+}
+
 function pickMemberRoleAuditEntry(logs, memberUserId, addedRoleIds, removedRoleIds) {
+  const uid = String(memberUserId);
   const now = Date.now();
-  const maxAge = 12_000;
+  const maxAge = 30_000;
   const added = [...addedRoleIds];
   const removed = [...removedRoleIds];
-  const list = [...logs.entries.values()];
 
-  for (const entry of list) {
-    if (entry.targetId !== memberUserId) continue;
-    if (now - entry.createdTimestamp > maxAge) continue;
-    let match = false;
+  const forUser = [...logs.entries.values()]
+    .filter((e) => e.targetId != null && String(e.targetId) === uid)
+    .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+
+  if (forUser.length === 0) return null;
+
+  const pool = forUser.filter((e) => now - e.createdTimestamp <= maxAge);
+  const searchIn = pool.length > 0 ? pool : forUser;
+
+  for (const entry of searchIn) {
     for (const id of added) {
-      if (auditChangeHasRole(entry.changes, '$add', id)) match = true;
+      if (
+        auditChangeHasRole(entry.changes, '$add', id) ||
+        auditChangesMentionRole(entry.changes, id)
+      ) {
+        return entry;
+      }
     }
     for (const id of removed) {
-      if (auditChangeHasRole(entry.changes, '$remove', id)) match = true;
+      if (
+        auditChangeHasRole(entry.changes, '$remove', id) ||
+        auditChangesMentionRole(entry.changes, id)
+      ) {
+        return entry;
+      }
     }
-    if (match) return entry;
   }
 
-  for (const entry of list) {
-    if (entry.targetId !== memberUserId) continue;
-    if (now - entry.createdTimestamp > maxAge) continue;
-    return entry;
-  }
+  return searchIn[0];
+}
 
-  return null;
+function safeAuditReason(reason) {
+  if (reason == null) return '';
+  const s = typeof reason === 'string' ? reason : String(reason);
+  const t = s.trim();
+  if (t.length > 900) return `${t.slice(0, 900)}…`;
+  return t;
+}
+
+/** Kod aralığı içinde kırılmayı önle */
+function safeTick(s) {
+  return String(s ?? '').replace(/`/g, "'");
 }
 
 async function formatAuditActor(entry, client) {
-  if (!entry?.executorId) {
-    return '**İşlemi yapan (audit):** Bilinmiyor';
-  }
-
-  let ex = entry.executor;
-  if (!ex?.tag) {
-    try {
-      ex = await client.users.fetch(entry.executorId);
-    } catch {
-      ex = null;
+  try {
+    if (!entry?.executorId) {
+      return '**İşlemi yapan (audit):** Bilinmiyor';
     }
-  }
 
-  const mention = `<@${entry.executorId}>`;
-  const tag = ex?.tag ?? entry.executorId;
-  const lines = [
-    `**İşlemi yapan (audit):** ${mention} · \`${tag}\` · **ID:** \`${entry.executorId}\``
-  ];
+    let ex = entry.executor;
+    if (!ex?.tag && !ex?.username) {
+      try {
+        ex = await client.users.fetch(entry.executorId);
+      } catch {
+        ex = null;
+      }
+    }
 
-  if (entry.reason?.trim()) {
-    lines.push(`**Audit sebep:** ${entry.reason.trim()}`);
-  }
-  if (entry.extra?.integrationType) {
-    lines.push(`**Kaynak:** \`${entry.extra.integrationType}\``);
-  }
-  if (ex?.bot) {
-    lines.push(
-      '*Not: İşlemi API üzerinden bu bot yaptı. Komutu veren moderatörü Discord çoğu zaman burada göstermez; Marpel Pro / benzeri botlar bazen yukarıdaki **Audit sebep** satırına moderatörü yazar—bot ayarına bağlı.*'
-    );
-  }
+    const mention = `<@${entry.executorId}>`;
+    const tag = ex?.tag ?? ex?.globalName ?? ex?.username ?? String(entry.executorId);
 
-  return lines.join('\n');
+    const lines = [
+      `**İşlemi yapan (audit):** ${mention} · \`${tag}\` · **ID:** \`${entry.executorId}\``
+    ];
+
+    const reasonText = safeAuditReason(entry.reason);
+    if (reasonText) {
+      lines.push(`**Audit sebep:** ${reasonText}`);
+    }
+
+    const integ = entry.extra && typeof entry.extra === 'object' && entry.extra.integrationType;
+    if (integ) {
+      lines.push(`**Kaynak:** \`${String(integ)}\``);
+    }
+
+    if (ex?.bot) {
+      lines.push(
+        '*Not: İşlemi bu bot yaptı; komutu veren kişi çoğu zaman audit’ta görünmez. Bazı botlar sebep satırına moderatör yazar.*'
+      );
+    }
+
+    return lines.join('\n');
+  } catch (e) {
+    return `**İşlemi yapan (audit):** (ayrıştırma hatası: ${e.message})`;
+  }
 }
 
 const LANDING_HTML = `<!DOCTYPE html>
@@ -256,20 +300,28 @@ function createBot() {
       const entry = logs
         ? pickMemberRoleAuditEntry(logs, newM.id, added.keys(), removed.keys())
         : null;
-      const whoBlock = await formatAuditActor(entry, newM.client);
+      let whoBlock = '**İşlemi yapan (audit):** Bilinmiyor';
+      try {
+        whoBlock = await formatAuditActor(entry, newM.client);
+      } catch (e) {
+        logErr('[discord] formatAuditActor:', e?.message || e);
+      }
+
+      const whoLabel = safeTick(newM.user.tag ?? newM.user.username ?? newM.id);
 
       for (const r of added.values()) {
         await logChan.send(
-          `➕ **${r.name}** verildi → Üye: <@${newM.id}> (\`${newM.user.tag}\`) · **ID:** \`${newM.id}\`\n${whoBlock}`
+          `➕ **${safeTick(r.name)}** verildi → Üye: <@${newM.id}> (\`${whoLabel}\`) · **ID:** \`${newM.id}\`\n${whoBlock}`
         );
       }
       for (const r of removed.values()) {
         await logChan.send(
-          `➖ **${r.name}** alındı → Üye: <@${newM.id}> (\`${newM.user.tag}\`) · **ID:** \`${newM.id}\`\n${whoBlock}`
+          `➖ **${safeTick(r.name)}** alındı → Üye: <@${newM.id}> (\`${whoLabel}\`) · **ID:** \`${newM.id}\`\n${whoBlock}`
         );
       }
     } catch (err) {
-      logErr('[discord] guildMemberUpdate:', err.message);
+      logErr('[discord] guildMemberUpdate:', err?.message || err);
+      if (err?.stack) logErr(err.stack);
     }
   });
 
