@@ -1,8 +1,5 @@
+const http = require('http');
 const { Client, GatewayIntentBits, AuditLogEvent, Partials } = require('discord.js');
-const express = require('express');  // Express kullanıyoruz
-
-// Express uygulaması oluşturuyoruz
-const app = express();
 
 const LANDING_HTML = `<!DOCTYPE html>
 <html lang="tr">
@@ -18,7 +15,6 @@ const LANDING_HTML = `<!DOCTYPE html>
       --text: #e8edf5;
       --muted: #8b98a8;
       --accent: #5b8cff;
-      --accent-soft: rgba(91, 140, 255, 0.15);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -130,21 +126,26 @@ const LANDING_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-app.get('/', (req, res) => {
-  res.type('html').send(LANDING_HTML);
+const server = http.createServer((req, res) => {
+  const path = req.url?.split('?')[0] || '/';
+  if (path === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(LANDING_HTML);
+    return;
+  }
+  res.writeHead(404);
+  res.end();
 });
 
-// Render / PaaS: dışarıdan erişim için 0.0.0.0 şart (sadece localhost dinlemek deploy'u düşürür)
 const port = Number(process.env.PORT) || 10000;
-const server = app.listen(port, '0.0.0.0', () => {
-  console.log(`HTTP Server aktif! http://0.0.0.0:${port}`);
+server.listen(port, '0.0.0.0', () => {
+  console.log(`HTTP Server aktif! Port: ${port}`);
 });
 server.on('error', (err) => {
   console.error('HTTP sunucu hatası:', err);
   process.exit(1);
 });
 
-// Discord.js bot ayarları
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -155,56 +156,63 @@ const client = new Client({
   partials: [Partials.GuildMember, Partials.User]
 });
 
-const LOG_CHANNEL_ID = "1499712129551433848";  // Log kanal ID'si
+const LOG_CHANNEL_ID = '1499712129551433848';
 const WHITELIST_ROLES = [
-  "1376625962027843695", 
-  "1376625962027843696", 
-  "1376625962027843697", 
-  "1376625962027843698"
+  '1376625962027843695',
+  '1376625962027843696',
+  '1376625962027843697',
+  '1376625962027843698'
 ];
 
-client.on("ready", () => {
+client.on('ready', () => {
   console.log(`[!] BOT GİRİŞ YAPTI: ${client.user.tag}`);
 });
 
-client.on("guildMemberUpdate", async (oldM, newM) => {
+client.on('guildMemberUpdate', async (oldM, newM) => {
   try {
-    const added = newM.roles.cache.filter(r => !oldM.roles.cache.has(r.id) && WHITELIST_ROLES.includes(r.id));
-    const removed = oldM.roles.cache.filter(r => !newM.roles.cache.has(r.id) && WHITELIST_ROLES.includes(r.id));
+    const added = newM.roles.cache.filter(
+      (r) => !oldM.roles.cache.has(r.id) && WHITELIST_ROLES.includes(r.id)
+    );
+    const removed = oldM.roles.cache.filter(
+      (r) => !newM.roles.cache.has(r.id) && WHITELIST_ROLES.includes(r.id)
+    );
 
     if (added.size === 0 && removed.size === 0) return;
 
     const logChan = await client.channels.fetch(LOG_CHANNEL_ID).catch(() => null);
     if (!logChan || !logChan.isTextBased()) {
-      return console.log("Kanal bulunamadı veya mesaj gönderilemeyen bir kanal türü!");
+      return console.log('Kanal bulunamadı veya mesaj gönderilemeyen bir kanal türü!');
     }
 
-    // Audit Log çekme
-    const logs = await newM.guild.fetchAuditLogs({ limit: 1, type: AuditLogEvent.MemberRoleUpdate }).catch(() => null);
+    const logs = await newM.guild
+      .fetchAuditLogs({ limit: 1, type: AuditLogEvent.MemberRoleUpdate })
+      .catch(() => null);
     const entry = logs ? logs.entries.first() : null;
     const exec =
       entry && entry.target.id === newM.id && entry.executor
         ? entry.executor.tag
-        : "Bilinmiyor";
+        : 'Bilinmiyor';
 
     for (const r of added.values()) {
-      await logChan.send(`➕ **${r.name}** verildi -> \`${newM.user.tag}\` | Yapan: \`${exec}\``);
+      await logChan.send(
+        `➕ **${r.name}** verildi -> \`${newM.user.tag}\` | Yapan: \`${exec}\``
+      );
     }
     for (const r of removed.values()) {
-      await logChan.send(`➖ **${r.name}** alındı -> \`${newM.user.tag}\` | Yapan: \`${exec}\``);
+      await logChan.send(
+        `➖ **${r.name}** alındı -> \`${newM.user.tag}\` | Yapan: \`${exec}\``
+      );
     }
   } catch (err) {
-    console.log("Hata çıktı: " + err.message);
+    console.log('Hata çıktı: ' + err.message);
   }
 });
 
-// Token: Render → Dashboard → bu Web Service → Environment → Environment Variables
-// Anahtar adı: TOKEN  |  Değer: Discord Developer Portal'dan bot token'ın
 const token = process.env.TOKEN?.trim();
 if (token) {
-  client.login(token).catch(e => console.log("Giriş Hatası: " + e));
+  client.login(token).catch((e) => console.log('Giriş Hatası: ' + e));
 } else {
   console.error(
-    "[!] TOKEN yok. Render'da Environment Variables içine TOKEN ekleyin (Secret olarak işaretleyin)."
+    '[!] TOKEN yok. Render → Environment Variables içine TOKEN ekleyin (Secret).'
   );
 }
